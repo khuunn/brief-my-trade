@@ -72,14 +72,17 @@ class StockSummary:
 
     @property
     def avg_buy_price(self) -> float:
+        """평균 매수단가 (KRW 기준 — amount_krw로 계산)"""
         return self.buy_amount / self.buy_qty if self.buy_qty > 0 else 0.0
 
     @property
     def avg_sell_price(self) -> float:
+        """평균 매도단가 (KRW 기준 — amount_krw로 계산)"""
         return self.sell_amount / self.sell_qty if self.sell_qty > 0 else 0.0
 
     @property
     def realized_pnl(self) -> float:
+        """실현손익 (KRW 기준)"""
         if self.sell_qty == 0 or self.buy_qty == 0:
             return 0.0
         cost = self.avg_buy_price * self.sell_qty
@@ -258,24 +261,32 @@ class TradeStore:
     # ── 집계 ─────────────────────────────────────────────────
 
     def summarize_trades(self, trades: list[Trade]) -> dict[str, StockSummary]:
+        """
+        거래 목록 집계.
+        buy_amount / sell_amount 는 항상 amount_krw(원화) 기준으로 합산.
+        → KRW seed + USD 체결 혼재 시에도 avg_buy_price가 정확히 계산됨.
+        commission / tax 도 amount_krw 비율로 원화 환산 (fx_rate 적용).
+        """
         summaries: dict[str, StockSummary] = {}
         for t in trades:
             key = t.name
             if key not in summaries:
                 summaries[key] = StockSummary(
                     name=t.name, ticker=t.ticker,
-                    market=t.market, currency=t.currency,
+                    market=t.market, currency="KRW",  # 항상 KRW 기준
                 )
             s = summaries[key]
             s.trade_count += 1
-            s.commission += t.commission
-            s.tax += t.tax
+            # 수수료/세금도 원화 환산
+            fx = t.fx_rate if t.fx_rate and t.fx_rate > 0 else 1.0
+            s.commission += t.commission * fx
+            s.tax += t.tax * fx
             if t.side == "매수":
                 s.buy_qty += t.qty
-                s.buy_amount += t.amount
+                s.buy_amount += t.amount_krw  # ← USD/KRW 무관하게 원화로 통일
             else:
                 s.sell_qty += t.qty
-                s.sell_amount += t.amount
+                s.sell_amount += t.amount_krw  # ← 동일
         return summaries
 
     def get_portfolio(self, market: str = None) -> dict[str, StockSummary]:

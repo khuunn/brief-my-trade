@@ -187,6 +187,81 @@ def test_export_csv_comma_in_name(store):
     assert '"테스트,종목"' in lines[1]
 
 
+# ── 혼재 통화 (US 종목 seed=KRW + 체결=USD) ───────────────────
+
+def test_mixed_currency_avg_price(store):
+    """
+    US 종목: seed(KRW) + 신규체결(USD) 혼재 시 평균단가가 KRW로 정확히 계산돼야 함.
+    ADBE seed 2주 @413,292원 + 체결 1주 @USD 283.22 (fx=1450 → 410,669원)
+    기대 avg_buy_price = (826,584 + 410,669) / 3 = 412,418원
+    """
+    seed = Trade(
+        id=None, date="2026-03-01", time="00:00",
+        market="US", ticker="ADBE", name="어도비",
+        side="매수", qty=2, price=413292.0,
+        amount=826584.0, currency="KRW",
+        fx_rate=1.0, amount_krw=826584.0,
+        memo="seed",
+    )
+    new_buy = Trade(
+        id=None, date="2026-03-05", time="22:00",
+        market="US", ticker="ADBE", name="어도비",
+        side="매수", qty=1, price=283.22,
+        amount=283.22, currency="USD",
+        fx_rate=1450.0, amount_krw=283.22 * 1450.0,
+    )
+    store.add_trade(seed)
+    store.add_trade(new_buy)
+    trades = store.get_trades_by_date_range("2026-01-01", "2026-12-31")
+    summaries = store.summarize_trades(trades)
+
+    s = summaries["어도비"]
+    assert s.buy_qty == 3
+    expected_avg = (826584.0 + 283.22 * 1450.0) / 3
+    assert s.avg_buy_price == pytest.approx(expected_avg, rel=1e-3)
+
+
+def test_mixed_currency_realized_pnl(store):
+    """
+    혼재 통화 종목 매도 시 실현손익도 KRW 기준으로 정확해야 함.
+    seed 2주 @413,292원 + 체결 1주 @USD 283.22 (fx=1450)
+    전량 매도 3주 @USD 300 (fx=1450 → 435,000원)
+    실현손익 = 매도금액(KRW) - 평균매수단가(KRW)*수량
+    """
+    seed = Trade(
+        id=None, date="2026-03-01", time="00:00",
+        market="US", ticker="ADBE", name="어도비",
+        side="매수", qty=2, price=413292.0,
+        amount=826584.0, currency="KRW",
+        fx_rate=1.0, amount_krw=826584.0, memo="seed",
+    )
+    buy = Trade(
+        id=None, date="2026-03-05", time="10:00",
+        market="US", ticker="ADBE", name="어도비",
+        side="매수", qty=1, price=283.22,
+        amount=283.22, currency="USD",
+        fx_rate=1450.0, amount_krw=283.22 * 1450.0,
+    )
+    sell = Trade(
+        id=None, date="2026-03-05", time="22:00",
+        market="US", ticker="ADBE", name="어도비",
+        side="매도", qty=3, price=300.0,
+        amount=900.0, currency="USD",
+        fx_rate=1450.0, amount_krw=900.0 * 1450.0,
+    )
+    store.add_trade(seed)
+    store.add_trade(buy)
+    store.add_trade(sell)
+    trades = store.get_trades_by_date_range("2026-01-01", "2026-12-31")
+    summaries = store.summarize_trades(trades)
+
+    s = summaries["어도비"]
+    total_buy_krw = 826584.0 + 283.22 * 1450.0
+    sell_krw = 900.0 * 1450.0
+    expected_pnl = sell_krw - total_buy_krw
+    assert s.realized_pnl == pytest.approx(expected_pnl, rel=1e-3)
+
+
 # ── capital ───────────────────────────────────────────────────
 
 def test_capital_deposit_and_withdraw(store):
