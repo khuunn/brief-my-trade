@@ -4,6 +4,8 @@ store.py — SQLite 저장소 (거래 + 자본금 + 환율 캐시)
 
 from __future__ import annotations
 
+import csv
+import io
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -381,12 +383,14 @@ class TradeStore:
         s = start or "2000-01-01"
         e = end or date.today().isoformat()
         trades = self.get_trades_by_date_range(s, e)
-        lines = ["날짜,시간,시장,종목명,티커,구분,수량,단가,금액,통화,환율,원화금액,수수료,세금,메모"]
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["날짜","시간","시장","종목명","티커","구분","수량","단가","금액","통화","환율","원화금액","수수료","세금","메모"])
         for t in trades:
-            lines.append(
-                f"{t.date},{t.time},{t.market},{t.name},{t.ticker},"
-                f"{t.side},{t.qty},{t.price},{t.amount},"
-                f"{t.currency},{t.fx_rate},{t.amount_krw},"
-                f"{t.commission},{t.tax},{t.memo}"
-            )
-        return "\n".join(lines)
+            writer.writerow([
+                t.date, t.time, t.market, t.name, t.ticker,
+                t.side, t.qty, t.price, t.amount,
+                t.currency, t.fx_rate, t.amount_krw,
+                t.commission, t.tax, t.memo,
+            ])
+        return buf.getvalue()

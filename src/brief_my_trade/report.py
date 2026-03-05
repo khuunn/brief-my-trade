@@ -5,9 +5,8 @@ report.py — 요약 텍스트 + 마크다운 보고서 생성
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Optional
 
-from .store import StockSummary, Trade, TradeStore
+from .store import StockSummary, TradeStore
 from .price import get_fx_rate, get_unrealized_pnl
 
 
@@ -32,39 +31,6 @@ def fmt_pct(val: float) -> str:
     if val > 0:
         return f"+{val:.2f}%"
     return f"{val:.2f}%"
-
-
-# ─── 자본금 + 수익률 ──────────────────────────────────────────
-
-def calc_return_rate(
-    store: TradeStore,
-    start: str,
-    end: str,
-    market: str = None,
-    unrealized_krw: float = 0.0,
-) -> dict:
-    capital = store.get_capital(market)
-    if market:
-        total_capital = capital.get(market, 0.0)
-    else:
-        total_capital = sum(capital.values())
-
-    stats = store.get_period_stats(start, end, market)
-    realized_krw = sum(
-        pnl * get_fx_rate(cur if cur != "KRW" else "KRW")
-        for cur, pnl in stats["realized_by_currency"].items()
-    )
-
-    total_pnl = realized_krw + unrealized_krw
-    return_pct = (total_pnl / total_capital * 100) if total_capital > 0 else 0.0
-
-    return {
-        "total_capital": total_capital,
-        "realized_krw": realized_krw,
-        "unrealized_krw": unrealized_krw,
-        "total_pnl_krw": total_pnl,
-        "return_pct": return_pct,
-    }
 
 
 # ─── 텔레그램 짧은 요약 ───────────────────────────────────────

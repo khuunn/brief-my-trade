@@ -4,12 +4,13 @@ price.py — 현재가 + 환율 실시간 조회 (yfinance 기반)
 
 from __future__ import annotations
 
+import logging
 import time
-from datetime import date
-from functools import lru_cache
 from typing import Optional
 
 import yfinance as yf
+
+logger = logging.getLogger(__name__)
 
 # 국내 종목 티커 suffix
 KR_SUFFIX = ".KS"   # KRX (KOSPI/KOSDAQ)
@@ -40,8 +41,8 @@ def get_current_price(ticker: str, market: str) -> Optional[float]:
         if price and price > 0:
             _price_cache[cache_key] = (price, time.time())
             return price
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("현재가 조회 실패 [%s:%s]: %s", market, ticker, e)
     return None
 
 
@@ -123,12 +124,14 @@ def get_fx_rate(currency: str) -> float:
         if rate and rate > 0:
             _fx_cache[cache_key] = (rate, time.time())
             return rate
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("환율 조회 실패 [%s]: %s", currency, e)
 
     # fallback: 대략적인 고정값 (실패 시)
     fallback = {"USD": 1380.0, "JPY": 9.2, "EUR": 1500.0, "HKD": 177.0}
-    return fallback.get(currency, 1.0)
+    fallback_val = fallback.get(currency, 1.0)
+    logger.warning("환율 fallback 사용 [%s]: %.1f", currency, fallback_val)
+    return fallback_val
 
 
 def get_unrealized_pnl(

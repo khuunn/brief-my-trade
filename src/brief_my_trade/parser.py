@@ -96,8 +96,7 @@ def _parse_kakao_alert(text: str) -> list[ParsedTrade]:
     trade_date = ""
     dm = _DATE_MDSLASH.match(date_raw.strip()) if date_raw else None
     if dm:
-        import datetime
-        year = datetime.date.today().year
+        year = date.today().year
         trade_date = f"{year}-{int(dm.group(1)):02d}-{int(dm.group(2)):02d}"
     elif re.match(r"\d{4}-\d{2}-\d{2}", date_raw):
         trade_date = date_raw[:10]
