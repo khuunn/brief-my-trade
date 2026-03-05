@@ -252,6 +252,9 @@ def _call_vision(image_b64: str, mime_type: str) -> list[dict]:
         }],
     )
 
+    if not response.choices:
+        raise RuntimeError("Vision API 응답 없음 (choices 비어있음)")
+
     raw = response.choices[0].message.content.strip()
     try:
         return _json.loads(raw)
@@ -284,10 +287,13 @@ class ParsedHolding:
 def parse_portfolio_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> list[ParsedHolding]:
     """보유종목 화면 스크린샷 → ParsedHolding 목록"""
     import json as _json
-    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     from openai import OpenAI
-    import os as _os
-    api_key = _os.environ.get("OPENROUTER_API_KEY")
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY 환경변수 없음")
+
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
     response = client.chat.completions.create(
         model="anthropic/claude-opus-4-5",
@@ -300,6 +306,10 @@ def parse_portfolio_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg
             ],
         }],
     )
+
+    if not response.choices:
+        raise RuntimeError("Vision API 응답 없음 (choices 비어있음)")
+
     raw = response.choices[0].message.content.strip()
     try:
         items = _json.loads(raw)
