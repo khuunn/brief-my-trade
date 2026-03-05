@@ -105,7 +105,7 @@ def format_period_summary(store: TradeStore, start: str, end: str) -> str:
             continue
 
         realized_krw = sum(
-            pnl * get_fx_rate(cur) if cur != "KRW" else pnl
+            pnl * get_fx_rate(cur)
             for cur, pnl in stats["realized_by_currency"].items()
         )
         cap = store.get_capital(market_code).get(market_code, 0)
@@ -211,7 +211,7 @@ def format_overview(store: TradeStore, period_key: str = "all") -> str:
             stats = store.get_period_stats("2000-01-01", end, market_code)
 
         realized_krw = sum(
-            pnl * get_fx_rate(cur) if cur != "KRW" else pnl
+            pnl * get_fx_rate(cur)
             for cur, pnl in stats["realized_by_currency"].items()
         )
 

@@ -123,6 +123,78 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n\n".join(results))
 
 
+async def _handle_seed_photo(
+    msg, image_bytes: bytes, store: TradeStore
+) -> None:
+    """보유종목 화면 파싱 → seed 거래 등록"""
+    try:
+        holdings = parse_portfolio_image_bytes(image_bytes, "image/jpeg")
+    except Exception as e:
+        await msg.edit_text(f"❌ 파싱 실패: {e}")
+        return
+
+    if not holdings:
+        await msg.edit_text("❌ 보유종목을 찾지 못했어요.")
+        return
+
+    results = []
+    today = date.today().isoformat()
+    for h in holdings:
+        name, ticker, market = store.resolve_name(h.name)
+        if h.ticker:
+            ticker = h.ticker
+        if h.market:
+            market = h.market
+        currency = h.currency
+        fx = get_fx_rate("USD") if currency == "USD" else 1.0
+        amount = h.qty * h.avg_price
+        trade = Trade(
+            id=None, date=today, time="00:00",
+            market=market, ticker=ticker, name=name,
+            side="매수", qty=h.qty, price=h.avg_price,
+            amount=amount, currency=currency,
+            fx_rate=fx, amount_krw=amount * fx,
+            memo="seed",
+        )
+        trade_id = store.add_trade(trade)
+        flag = "🇰🇷" if market == "KR" else "🇺🇸"
+        results.append(f"#{trade_id} {flag} {name} {h.qty}주 @ {fmt_money(h.avg_price, currency)}")
+
+    await msg.edit_text(
+        f"✅ 보유종목 {len(holdings)}개 시딩 완료\n\n" + "\n".join(results)
+        + "\n\n이제 /portfolio 로 미실현손익 확인 가능해요!"
+    )
+
+
+async def _handle_trade_photo(
+    msg, image_bytes: bytes, store: TradeStore
+) -> None:
+    """체결 화면 파싱 → 거래 등록"""
+    try:
+        parsed_list = parse_image_bytes(image_bytes, "image/jpeg")
+    except Exception as e:
+        await msg.edit_text(f"❌ 파싱 실패: {e}\n\n수동 입력: `매수 종목명 수량 단가`")
+        return
+
+    if not parsed_list:
+        await msg.edit_text(
+            "❓ 체결 화면인가요, 보유종목 화면인가요?\n"
+            "• 체결 화면: 그냥 전송\n"
+            "• 보유종목 화면: 캡션에 '보유' 써서 전송"
+        )
+        return
+
+    results = []
+    for p in parsed_list:
+        trade = parsed_to_trade(p, store)
+        trade_id = store.add_trade(trade)
+        results.append(format_trade_confirm(trade, trade_id))
+
+    await msg.edit_text(
+        f"총 {len(parsed_list)}건 파싱 완료\n\n" + "\n\n".join(results)
+    )
+
+
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """스크린샷 → Claude Vision 파싱 (체결 or 보유종목 자동 판단)"""
     if not is_allowed(update):
@@ -132,77 +204,15 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     is_seed = any(kw in caption for kw in ["보유", "잔고", "seed", "시딩", "포트폴리오"])
 
     msg = await update.message.reply_text("📸 스크린샷 분석 중...")
-
     photo = update.message.photo[-1]
     file = await ctx.bot.get_file(photo.file_id)
     image_bytes = bytes(await file.download_as_bytearray())
+    store = get_store()
 
     if is_seed:
-        # 보유종목 화면 파싱
-        try:
-            holdings = parse_portfolio_image_bytes(image_bytes, "image/jpeg")
-        except Exception as e:
-            await msg.edit_text(f"❌ 파싱 실패: {e}")
-            return
-
-        if not holdings:
-            await msg.edit_text("❌ 보유종목을 찾지 못했어요.")
-            return
-
-        store = get_store()
-        results = []
-        today = date.today().isoformat()
-        for h in holdings:
-            name, ticker, market = store.resolve_name(h.name)
-            if h.ticker:
-                ticker = h.ticker
-            if h.market:
-                market = h.market
-            currency = h.currency
-            fx = get_fx_rate("USD") if currency == "USD" else 1.0
-            amount = h.qty * h.avg_price
-            trade = Trade(
-                id=None, date=today, time="00:00",
-                market=market, ticker=ticker, name=name,
-                side="매수", qty=h.qty, price=h.avg_price,
-                amount=amount, currency=currency,
-                fx_rate=fx, amount_krw=amount * fx,
-                memo="seed",
-            )
-            trade_id = store.add_trade(trade)
-            flag = "🇰🇷" if market == "KR" else "🇺🇸"
-            results.append(f"#{trade_id} {flag} {name} {h.qty}주 @ {fmt_money(h.avg_price, currency)}")
-
-        await msg.edit_text(
-            f"✅ 보유종목 {len(holdings)}개 시딩 완료\n\n" + "\n".join(results)
-            + "\n\n이제 /portfolio 로 미실현손익 확인 가능해요!"
-        )
+        await _handle_seed_photo(msg, image_bytes, store)
     else:
-        # 체결 화면 파싱
-        try:
-            parsed_list = parse_image_bytes(image_bytes, "image/jpeg")
-        except Exception as e:
-            await msg.edit_text(f"❌ 파싱 실패: {e}\n\n수동 입력: `매수 종목명 수량 단가`")
-            return
-
-        if not parsed_list:
-            await msg.edit_text(
-                "❓ 체결 화면인가요, 보유종목 화면인가요?\n"
-                "• 체결 화면: 그냥 전송\n"
-                "• 보유종목 화면: 캡션에 '보유' 써서 전송"
-            )
-            return
-
-        store = get_store()
-        results = []
-        for p in parsed_list:
-            trade = parsed_to_trade(p, store)
-            trade_id = store.add_trade(trade)
-            results.append(format_trade_confirm(trade, trade_id))
-
-        await msg.edit_text(
-            f"총 {len(parsed_list)}건 파싱 완료\n\n" + "\n\n".join(results)
-        )
+        await _handle_trade_photo(msg, image_bytes, store)
 
 
 # ─── 명령어 ───────────────────────────────────────────────────

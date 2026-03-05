@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 DB_PATH = Path("./trades.db")
+EPOCH_DATE = "2000-01-01"  # 전체기간 조회 시 시작일
 
 
 # ─── 데이터 클래스 ────────────────────────────────────────────
@@ -280,7 +281,7 @@ class TradeStore:
     def get_portfolio(self, market: str = None) -> dict[str, StockSummary]:
         """미청산 포지션 (net_qty > 0)"""
         end = date.today().isoformat()
-        trades = self.get_trades_by_date_range("2000-01-01", end, market)
+        trades = self.get_trades_by_date_range(EPOCH_DATE, end, market)
         summaries = self.summarize_trades(trades)
         return {k: v for k, v in summaries.items() if v.net_qty > 0}
 
@@ -380,7 +381,7 @@ class TradeStore:
             )
 
     def export_csv(self, start: str = None, end: str = None) -> str:
-        s = start or "2000-01-01"
+        s = start or EPOCH_DATE
         e = end or date.today().isoformat()
         trades = self.get_trades_by_date_range(s, e)
         buf = io.StringIO()

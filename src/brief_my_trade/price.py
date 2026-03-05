@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Optional
 
+import requests
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -48,13 +49,12 @@ def get_current_price(ticker: str, market: str) -> Optional[float]:
 
 def _fetch_kr_price_naver(ticker: str) -> Optional[float]:
     """네이버 금융 API로 국내 종목 현재가 조회 (6자리 코드 필요)"""
-    import requests as req
     code = ticker.replace(".KS", "").replace(".KQ", "")
     if len(code) != 6:  # 숫자 6자리 또는 0148J0 형태 허용
         return None
     try:
         url = f"https://m.stock.naver.com/api/stock/{code}/basic"
-        r = req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         if r.status_code != 200:
             return None
         data = r.json()
