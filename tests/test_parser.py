@@ -120,6 +120,37 @@ def test_kakao_auto_detect_from_parse_text():
     assert result[0].currency == "USD"
 
 
+KAKAO_KR_DOMESTIC = """[메리츠증권] 주문체결 안내
+계좌명 : 송*훈
+계좌번호 : 3023**04-01
+종목 : 삼성전기(009150)
+구분 : 매수
+체결수량 : 1주
+체결단가 : 410,500원
+주문일자/번호 : 03/06 No. 55966"""
+
+
+def test_kakao_kr_domestic_buy():
+    """국내주식 카카오 알림 포맷 파싱"""
+    result = _parse_kakao_alert(KAKAO_KR_DOMESTIC)
+    assert len(result) == 1
+    t = result[0]
+    assert t.name == "삼성전기"
+    assert t.side == "매수"
+    assert t.qty == 1
+    assert t.price == pytest.approx(410500.0)
+    assert t.currency == "KRW"
+    assert t.trade_date == "2026-03-06"
+
+
+def test_kakao_kr_domestic_via_parse_text():
+    """parse_text가 국내 알림 자동 감지"""
+    result = parse_text(KAKAO_KR_DOMESTIC)
+    assert len(result) == 1
+    assert result[0].name == "삼성전기"
+    assert result[0].currency == "KRW"
+
+
 def test_kakao_missing_fields_returns_empty():
     result = _parse_kakao_alert("종목명 : 삼성전자\n체결단가 : 58000")
     # 매매구분 없음 → 빈 리스트

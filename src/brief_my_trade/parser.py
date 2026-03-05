@@ -48,13 +48,15 @@ SIDE_MAP = {"buy": "매수", "sell": "매도"}
 _KV_PATTERN = re.compile(r"^(.+?)\s*:\s*(.+)$")
 _KAKAO_NAME_PATTERN = re.compile(r"^(.+?)\(([A-Z0-9.]+)\)$")  # 퀵로직(QUIK)
 _CURRENCY_PRICE_PATTERN = re.compile(r"^(USD|KRW|JPY|EUR|HKD)?\s*([\d,.]+)$", re.IGNORECASE)
-_DATE_MDSLASH = re.compile(r"^(\d{1,2})/(\d{1,2})$")  # 03/05
+_DATE_MDSLASH = re.compile(r"^(\d{1,2})/(\d{1,2})$")       # 03/05 (exact match)
+_DATE_MDSLASH_SEARCH = re.compile(r"(\d{1,2})/(\d{1,2})")  # 03/06 No. 55966 (partial)
 
 
 def _parse_kakao_alert(text: str) -> list[ParsedTrade]:
     """
     메리츠증권 카카오 알림톡 텍스트 파싱.
-    [메리츠증권] 해외주식/국내주식 주문체결 안내 포함한 구조화 텍스트.
+    해외주식: 종목명 / 매매구분 / 체결단가(USD X.XX) / 체결일자
+    국내주식: 종목     / 구분     / 체결단가(X원)     / 주문일자/번호
     """
     lines = text.strip().splitlines()
     fields: dict[str, str] = {}
@@ -63,11 +65,17 @@ def _parse_kakao_alert(text: str) -> list[ParsedTrade]:
         if m:
             fields[m.group(1).strip()] = m.group(2).strip()
 
+    # 필드 alias: 국내(종목/구분) ↔ 해외(종목명/매매구분) 통일
+    if "종목명" not in fields and "종목" in fields:
+        fields["종목명"] = fields["종목"]
+    if "매매구분" not in fields and "구분" in fields:
+        fields["매매구분"] = fields["구분"]
+
     # 필수 필드 확인
     if "종목명" not in fields or "매매구분" not in fields or "체결단가" not in fields:
         return []
 
-    # 종목명 + 티커 분리
+    # 종목명 + 티커 분리 (삼성전기(009150) or 퀵로직(QUIK))
     raw_name = fields["종목명"]
     nm = _KAKAO_NAME_PATTERN.match(raw_name)
     name = nm.group(1).strip() if nm else raw_name
@@ -78,8 +86,9 @@ def _parse_kakao_alert(text: str) -> list[ParsedTrade]:
     side = "매수" if "매수" in side_raw else "매도"
 
     # 체결단가 + 통화
-    price_raw = fields.get("체결단가", "0")
-    pm = _CURRENCY_PRICE_PATTERN.match(price_raw.replace(",", ""))
+    # 해외: "USD 8.8500" / 국내: "410,500원" or "410500"
+    price_raw = fields.get("체결단가", "0").replace(",", "").replace("원", "").strip()
+    pm = _CURRENCY_PRICE_PATTERN.match(price_raw)
     currency = "KRW"
     price = 0.0
     if pm:
@@ -91,13 +100,14 @@ def _parse_kakao_alert(text: str) -> list[ParsedTrade]:
     qty_raw = fields.get("체결수량") or fields.get("주문수량", "0")
     qty = int(re.sub(r"[^\d]", "", qty_raw) or "0")
 
-    # 날짜
-    date_raw = fields.get("체결일자", "")
+    # 날짜 — 체결일자(해외) or 주문일자/번호(국내: "03/06 No. 55966")
+    date_raw = fields.get("체결일자") or fields.get("주문일자/번호", "")
+    # MM/DD 부분 추출 (문자열 중간에 있어도 탐색)
+    date_match = _DATE_MDSLASH_SEARCH.search(date_raw.strip()) if date_raw else None
     trade_date = ""
-    dm = _DATE_MDSLASH.match(date_raw.strip()) if date_raw else None
-    if dm:
+    if date_match:
         year = date.today().year
-        trade_date = f"{year}-{int(dm.group(1)):02d}-{int(dm.group(2)):02d}"
+        trade_date = f"{year}-{int(date_match.group(1)):02d}-{int(date_match.group(2)):02d}"
     elif re.match(r"\d{4}-\d{2}-\d{2}", date_raw):
         trade_date = date_raw[:10]
 
