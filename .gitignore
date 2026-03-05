@@ -1,0 +1,36 @@
+# 환경변수 / 시크릿
+.env
+.env.*
+!.env.example
+
+# DB / 데이터
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 로그 / 리포트
+logs/
+reports/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
