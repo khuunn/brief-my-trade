@@ -348,6 +348,38 @@ class TradeStore:
             result[m] = result.get(m, 0) + amt
         return result
 
+    def get_cash(self, market: str = None) -> dict[str, float]:
+        """
+        예수금 = 자본금 이벤트(초기/입금/출금) - 매수금액(KRW) + 매도금액(KRW)
+        seed 거래는 제외 (과거 포지션 시딩이므로 예수금과 무관).
+        모든 금액은 amount_krw 기준.
+        """
+        cash = self.get_capital(market)
+
+        with self._conn() as conn:
+            if market:
+                rows = conn.execute(
+                    "SELECT market, side, amount_krw FROM trades"
+                    " WHERE (memo IS NULL OR memo != 'seed') AND market=?",
+                    (market,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT market, side, amount_krw FROM trades"
+                    " WHERE memo IS NULL OR memo != 'seed'"
+                ).fetchall()
+
+        for row in rows:
+            m = row["market"]
+            if m not in cash:
+                cash[m] = 0.0
+            if row["side"] == "매수":
+                cash[m] -= row["amount_krw"]
+            else:
+                cash[m] += row["amount_krw"]
+
+        return cash
+
     # ── 환율 캐시 ─────────────────────────────────────────────
 
     def cache_fx_rate(self, currency: str, rate: float, on_date: str = None):

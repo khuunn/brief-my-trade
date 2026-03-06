@@ -264,6 +264,71 @@ def test_mixed_currency_realized_pnl(store):
 
 # ── capital ───────────────────────────────────────────────────
 
+def test_get_cash_after_buy(store):
+    """초기자본 - 매수금액 = 예수금"""
+    store.add_capital_event(CapitalEvent(
+        id=None, date="2026-01-01", market="KR",
+        type="initial", amount_krw=10_000_000.0,
+    ))
+    buy = Trade(
+        id=None, date="2026-03-05", time="10:00",
+        market="KR", ticker="005930", name="삼성전자",
+        side="매수", qty=10, price=100_000.0,
+        amount=1_000_000.0, currency="KRW",
+        fx_rate=1.0, amount_krw=1_000_000.0,
+    )
+    store.add_trade(buy)
+    cash = store.get_cash("KR")
+    assert cash["KR"] == pytest.approx(9_000_000.0)
+
+
+def test_get_cash_after_sell(store):
+    """매수 후 매도 → 예수금 반영"""
+    store.add_capital_event(CapitalEvent(
+        id=None, date="2026-01-01", market="KR",
+        type="initial", amount_krw=10_000_000.0,
+    ))
+    buy = Trade(
+        id=None, date="2026-03-01", time="10:00",
+        market="KR", ticker="005930", name="삼성전자",
+        side="매수", qty=10, price=100_000.0,
+        amount=1_000_000.0, currency="KRW",
+        fx_rate=1.0, amount_krw=1_000_000.0,
+    )
+    sell = Trade(
+        id=None, date="2026-03-05", time="14:00",
+        market="KR", ticker="005930", name="삼성전자",
+        side="매도", qty=10, price=120_000.0,
+        amount=1_200_000.0, currency="KRW",
+        fx_rate=1.0, amount_krw=1_200_000.0,
+    )
+    store.add_trade(buy)
+    store.add_trade(sell)
+    cash = store.get_cash("KR")
+    # 10M - 1M (매수) + 1.2M (매도) = 10.2M
+    assert cash["KR"] == pytest.approx(10_200_000.0)
+
+
+def test_get_cash_excludes_seed(store):
+    """seed 거래는 예수금 계산에서 제외"""
+    store.add_capital_event(CapitalEvent(
+        id=None, date="2026-01-01", market="KR",
+        type="initial", amount_krw=10_000_000.0,
+    ))
+    seed = Trade(
+        id=None, date="2026-03-01", time="00:00",
+        market="KR", ticker="005930", name="삼성전자",
+        side="매수", qty=10, price=100_000.0,
+        amount=1_000_000.0, currency="KRW",
+        fx_rate=1.0, amount_krw=1_000_000.0,
+        memo="seed",
+    )
+    store.add_trade(seed)
+    cash = store.get_cash("KR")
+    # seed 제외 → 자본금 그대로
+    assert cash["KR"] == pytest.approx(10_000_000.0)
+
+
 def test_capital_deposit_and_withdraw(store):
     store.add_capital_event(CapitalEvent(
         id=None, date="2026-01-01", market="KR",

@@ -337,13 +337,19 @@ async def cmd_capital(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not args:
         # 현황 조회
-        capital = store.get_capital()
+        capital = store.get_capital()   # 순수 자본금 (입출금만)
+        cash = store.get_cash()         # 예수금 (자본금 - 매수 + 매도)
+        markets = sorted(set(list(capital.keys()) + list(cash.keys())))
         lines = ["💰 *자본금 현황*\n"]
-        for market, amt in capital.items():
+        for market in markets:
             flag = "🇰🇷" if market == "KR" else "🇺🇸"
-            lines.append(f"{flag} {market}: {fmt_money(amt)}")
-        total = sum(capital.values())
-        lines.append(f"\n합산: {fmt_money(total)}")
+            cap = capital.get(market, 0)
+            avail = cash.get(market, 0)
+            lines.append(f"{flag} {market}: 투입 {fmt_money(cap)} | 예수금 {fmt_money(avail)}")
+        total_cap = sum(capital.values())
+        total_cash = sum(cash.values())
+        lines.append(f"\n투입 합산: {fmt_money(total_cap)}")
+        lines.append(f"예수금 합산: {fmt_money(total_cash)}")
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -558,7 +564,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     store = get_store()
     stats = store.get_period_stats("2000-01-01", date.today().isoformat())
-    capital = store.get_capital()
+    capital = store.get_capital()   # 투입 자본 기준으로 수익률 계산
     total_capital = sum(capital.values())
 
     lines = [
