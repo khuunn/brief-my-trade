@@ -270,7 +270,11 @@ class TradeStore:
 
     # ── 집계 ─────────────────────────────────────────────────
 
-    def summarize_trades(self, trades: list[Trade]) -> dict[str, StockSummary]:
+    def summarize_trades(
+        self,
+        trades: list[Trade],
+        pnl_after: str | None = None,
+    ) -> dict[str, StockSummary]:
         """
         거래 목록 집계 — 이동평균법(移動平均法) 적용.
 
@@ -278,7 +282,10 @@ class TradeStore:
         매도 시 당시 이동평균단가로 실현손익을 계산.
         (한국 증권사 표준 방식)
 
-        buy_amount / sell_amount 는 amount_krw(원화) 기준으로 합산.
+        pnl_after: 이 날짜(YYYY-MM-DD) 이후 매도분만 realized_pnl에 반영.
+                   None이면 전체 반영 (포트폴리오 조회용).
+                   기간 조회 시에는 start 날짜를 전달해서 cost basis 왜곡 방지.
+        buy_amount / sell_amount 는 pnl_after 이후 거래만 집계 (기간 표시용).
         trades는 반드시 date, time 순으로 정렬되어야 함.
         """
         summaries: dict[str, StockSummary] = {}
@@ -290,25 +297,32 @@ class TradeStore:
                     market=t.market, currency="KRW",
                 )
             s = summaries[key]
-            s.trade_count += 1
-            # 수수료/세금 원화 환산
-            fx = t.fx_rate if t.fx_rate and t.fx_rate > 0 else 1.0
-            s.commission += t.commission * fx
-            s.tax += t.tax * fx
+            # pnl_after 기준: 기간 내 거래인지 여부
+            in_period = pnl_after is None or t.date >= pnl_after
+
+            if in_period:
+                s.trade_count += 1
+                # 수수료/세금 원화 환산 (기간 내만)
+                fx = t.fx_rate if t.fx_rate and t.fx_rate > 0 else 1.0
+                s.commission += t.commission * fx
+                s.tax += t.tax * fx
 
             if t.side == "매수":
-                s.buy_qty += t.qty
-                s.buy_amount += t.amount_krw
-                # 이동평균단가 갱신: (기존보유금액 + 신규매수금액) / 총보유수량
+                if in_period:
+                    s.buy_qty += t.qty
+                    s.buy_amount += t.amount_krw
+                # 이동평균단가 갱신: 기간 외 거래도 cost basis 추적에 포함
                 total_cost = s._moving_avg * s._holding_qty + t.amount_krw
                 s._holding_qty += t.qty
                 s._moving_avg = total_cost / s._holding_qty if s._holding_qty > 0 else 0.0
             else:
-                s.sell_qty += t.qty
-                s.sell_amount += t.amount_krw
-                # 실현손익 = 매도금액 - 이동평균단가 × 매도수량
+                if in_period:
+                    s.sell_qty += t.qty
+                    s.sell_amount += t.amount_krw
+                # 실현손익 = 매도금액 - 이동평균단가 × 매도수량 (기간 내만 반영)
                 cost = s._moving_avg * t.qty
-                s._realized_pnl += t.amount_krw - cost
+                if in_period:
+                    s._realized_pnl += t.amount_krw - cost
                 s._holding_qty = max(0, s._holding_qty - t.qty)
                 # 전량 청산 시 이동평균 초기화
                 if s._holding_qty == 0:
@@ -324,18 +338,21 @@ class TradeStore:
         return {k: v for k, v in summaries.items() if v.net_qty > 0}
 
     def get_period_stats(self, start: str, end: str, market: str = None) -> dict:
-        trades = self.get_trades_by_date_range(start, end, market)
-        real_trades = [t for t in trades if t.memo != "seed"]
-        total_buy_krw = sum(t.amount_krw for t in real_trades if t.side == "매수")
-        total_sell_krw = sum(t.amount_krw for t in real_trades if t.side == "매도")
-        summaries = self.summarize_trades(real_trades)
+        # 전체 이력 로드 (seed 포함) → cost basis 정확히 추적
+        all_trades = self.get_trades_by_date_range(EPOCH_DATE, end, market)
+        # 기간 내 non-seed 거래 (건수/금액 표시용)
+        period_trades = [t for t in all_trades if t.date >= start and t.memo != "seed"]
+        total_buy_krw = sum(t.amount_krw for t in period_trades if t.side == "매수")
+        total_sell_krw = sum(t.amount_krw for t in period_trades if t.side == "매도")
+        # seed 포함 전체 이력으로 이동평균 계산, 기간 내 non-seed 매도만 realized_pnl 반영
+        summaries = self.summarize_trades(all_trades, pnl_after=start)
         realized_by_currency: dict[str, float] = {}
         for s in summaries.values():
             cur = s.currency
             realized_by_currency[cur] = realized_by_currency.get(cur, 0) + s.realized_pnl
         return {
-            "trade_count": len(trades),
-            "real_trade_count": len(real_trades),
+            "trade_count": len(period_trades),
+            "real_trade_count": len(period_trades),
             "total_buy_krw": total_buy_krw,
             "total_sell_krw": total_sell_krw,
             "realized_by_currency": realized_by_currency,
