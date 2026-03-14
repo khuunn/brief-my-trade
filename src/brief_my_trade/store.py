@@ -59,12 +59,16 @@ class StockSummary:
     market: str
     currency: str
     buy_qty: int = 0
-    buy_amount: float = 0.0
+    buy_amount: float = 0.0       # 총 매수금액 (KRW)
     sell_qty: int = 0
-    sell_amount: float = 0.0
+    sell_amount: float = 0.0      # 총 매도금액 (KRW)
     commission: float = 0.0
     tax: float = 0.0
     trade_count: int = 0
+    # 이동평균법 계산용 (summarize_trades에서 갱신)
+    _holding_qty: int = field(default=0, repr=False)
+    _moving_avg: float = field(default=0.0, repr=False)   # 현재 이동평균단가 (KRW/주)
+    _realized_pnl: float = field(default=0.0, repr=False) # 누적 실현손익
 
     @property
     def net_qty(self) -> int:
@@ -72,21 +76,18 @@ class StockSummary:
 
     @property
     def avg_buy_price(self) -> float:
-        """평균 매수단가 (KRW 기준 — amount_krw로 계산)"""
-        return self.buy_amount / self.buy_qty if self.buy_qty > 0 else 0.0
+        """현재 이동평균단가 (KRW) — 미실현손익 계산에 사용"""
+        return self._moving_avg
 
     @property
     def avg_sell_price(self) -> float:
-        """평균 매도단가 (KRW 기준 — amount_krw로 계산)"""
+        """평균 매도단가 (KRW 기준)"""
         return self.sell_amount / self.sell_qty if self.sell_qty > 0 else 0.0
 
     @property
     def realized_pnl(self) -> float:
-        """실현손익 (KRW 기준)"""
-        if self.sell_qty == 0 or self.buy_qty == 0:
-            return 0.0
-        cost = self.avg_buy_price * self.sell_qty
-        return self.sell_amount - cost - self.commission - self.tax
+        """실현손익 (KRW) — 이동평균법"""
+        return self._realized_pnl - self.commission - self.tax
 
 
 # ─── TradeStore ───────────────────────────────────────────────
@@ -205,7 +206,16 @@ class TradeStore:
                  trade.currency, trade.fx_rate, trade.amount_krw,
                  trade.commission, trade.tax, trade.memo),
             )
-            return cur.lastrowid
+            trade_id = cur.lastrowid
+
+        # Notion 동기화 (설정된 경우)
+        try:
+            from .notion import push_trade
+            push_trade(trade)
+        except Exception:
+            pass
+
+        return trade_id
 
     def delete_trade(self, trade_id: int) -> bool:
         with self._conn() as conn:
@@ -262,10 +272,14 @@ class TradeStore:
 
     def summarize_trades(self, trades: list[Trade]) -> dict[str, StockSummary]:
         """
-        거래 목록 집계.
-        buy_amount / sell_amount 는 항상 amount_krw(원화) 기준으로 합산.
-        → KRW seed + USD 체결 혼재 시에도 avg_buy_price가 정확히 계산됨.
-        commission / tax 도 amount_krw 비율로 원화 환산 (fx_rate 적용).
+        거래 목록 집계 — 이동평균법(移動平均法) 적용.
+
+        매수할 때마다 이동평균단가를 갱신하고,
+        매도 시 당시 이동평균단가로 실현손익을 계산.
+        (한국 증권사 표준 방식)
+
+        buy_amount / sell_amount 는 amount_krw(원화) 기준으로 합산.
+        trades는 반드시 date, time 순으로 정렬되어야 함.
         """
         summaries: dict[str, StockSummary] = {}
         for t in trades:
@@ -273,20 +287,33 @@ class TradeStore:
             if key not in summaries:
                 summaries[key] = StockSummary(
                     name=t.name, ticker=t.ticker,
-                    market=t.market, currency="KRW",  # 항상 KRW 기준
+                    market=t.market, currency="KRW",
                 )
             s = summaries[key]
             s.trade_count += 1
-            # 수수료/세금도 원화 환산
+            # 수수료/세금 원화 환산
             fx = t.fx_rate if t.fx_rate and t.fx_rate > 0 else 1.0
             s.commission += t.commission * fx
             s.tax += t.tax * fx
+
             if t.side == "매수":
                 s.buy_qty += t.qty
-                s.buy_amount += t.amount_krw  # ← USD/KRW 무관하게 원화로 통일
+                s.buy_amount += t.amount_krw
+                # 이동평균단가 갱신: (기존보유금액 + 신규매수금액) / 총보유수량
+                total_cost = s._moving_avg * s._holding_qty + t.amount_krw
+                s._holding_qty += t.qty
+                s._moving_avg = total_cost / s._holding_qty if s._holding_qty > 0 else 0.0
             else:
                 s.sell_qty += t.qty
-                s.sell_amount += t.amount_krw  # ← 동일
+                s.sell_amount += t.amount_krw
+                # 실현손익 = 매도금액 - 이동평균단가 × 매도수량
+                cost = s._moving_avg * t.qty
+                s._realized_pnl += t.amount_krw - cost
+                s._holding_qty = max(0, s._holding_qty - t.qty)
+                # 전량 청산 시 이동평균 초기화
+                if s._holding_qty == 0:
+                    s._moving_avg = 0.0
+
         return summaries
 
     def get_portfolio(self, market: str = None) -> dict[str, StockSummary]:
