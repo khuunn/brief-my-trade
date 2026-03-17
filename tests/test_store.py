@@ -162,6 +162,15 @@ def test_resolve_us_ticker(store):
     assert market == "US"
 
 
+def test_resolve_kr_ticker_with_uppercase_prefix(store):
+    """DB하이텍처럼 영문 대문자로 시작하는 한글 종목명이 US로 오분류되면 안 됨 (isupper+isalpha 버그)"""
+    name, ticker, market = store.resolve_name("DB하이텍")
+    assert market == "KR", f"한글 혼용 종목은 KR이어야 함, got {market}"
+
+    name2, ticker2, market2 = store.resolve_name("LG화학")
+    assert market2 == "KR", f"LG화학도 KR이어야 함, got {market2}"
+
+
 def test_add_custom_alias(store):
     store.add_alias("하닉", "SK하이닉스", "000660", "KR")
     name, ticker, market = store.resolve_name("하닉")

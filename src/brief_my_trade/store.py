@@ -297,6 +297,9 @@ class TradeStore:
                     market=t.market, currency="KRW",
                 )
             s = summaries[key]
+            # 빈 ticker 거래로 summary 생성된 경우, 이후 유효한 ticker로 갱신
+            if t.ticker and not s.ticker:
+                s.ticker = t.ticker
             # pnl_after 기준: 기간 내 거래인지 여부
             in_period = pnl_after is None or t.date >= pnl_after
 
@@ -340,8 +343,10 @@ class TradeStore:
     def get_period_stats(self, start: str, end: str, market: str = None) -> dict:
         # 전체 이력 로드 (seed 포함) → cost basis 정확히 추적
         all_trades = self.get_trades_by_date_range(EPOCH_DATE, end, market)
+        # 기간 내 전체 거래 (seed 포함) — trade_count용
+        all_period_trades = [t for t in all_trades if t.date >= start]
         # 기간 내 non-seed 거래 (건수/금액 표시용)
-        period_trades = [t for t in all_trades if t.date >= start and t.memo != "seed"]
+        period_trades = [t for t in all_period_trades if t.memo != "seed"]
         total_buy_krw = sum(t.amount_krw for t in period_trades if t.side == "매수")
         total_sell_krw = sum(t.amount_krw for t in period_trades if t.side == "매도")
         # seed 포함 전체 이력으로 이동평균 계산, 기간 내 non-seed 매도만 realized_pnl 반영
@@ -351,7 +356,7 @@ class TradeStore:
             cur = s.currency
             realized_by_currency[cur] = realized_by_currency.get(cur, 0) + s.realized_pnl
         return {
-            "trade_count": len(period_trades),
+            "trade_count": len(all_period_trades),
             "real_trade_count": len(period_trades),
             "total_buy_krw": total_buy_krw,
             "total_sell_krw": total_sell_krw,
@@ -455,8 +460,8 @@ class TradeStore:
         # 숫자 6자리면 국내 종목코드로 간주
         if raw.isdigit() and len(raw) == 6:
             return raw, raw, "KR"
-        # 영문 대문자면 해외
-        if raw.isupper() and raw.isalpha():
+        # 영문 대문자만으로 이루어진 경우 해외 (한글 혼용 방지: isascii() 체크)
+        if raw.isupper() and raw.isalpha() and raw.isascii():
             return raw, raw, "US"
         return raw, "", "KR"
 
