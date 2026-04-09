@@ -26,18 +26,20 @@ from telegram.ext import (
     filters,
 )
 
-from .parser import ParsedTrade, ParsedHolding, parse_image_bytes, parse_text, parse_portfolio_image_bytes
-from .price import get_fx_rate
+from .parser import ParsedTrade, parse_text
+from .price import get_current_price, get_fx_rate
 from .report import (
     fmt_money,
     format_overview,
     format_period_summary,
     format_portfolio,
+    format_ta_report,
     format_today_summary,
     format_week_summary,
     generate_weekly_report,
 )
 from .store import CapitalEvent, Trade, TradeStore
+from .trailing import get_all_stops, get_stop, init_trailing_db, upsert_stop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,11 +71,15 @@ def is_allowed(update: Update) -> bool:
 
 def parsed_to_trade(p: ParsedTrade, store: TradeStore) -> Trade:
     name, ticker, market = store.resolve_name(p.name)
-    # 파서에서 마켓 명시한 경우 우선
+    # 카카오 알림톡 파서가 추출한 ticker/market 우선 적용
+    if p.ticker:
+        ticker = p.ticker
     currency = p.currency
     if currency == "USD":
         market = "US"
-    fx = get_fx_rate("USD") if currency == "USD" else 1.0
+    elif currency == "JPY":
+        market = "JP"
+    fx = get_fx_rate(currency) if currency in ("USD", "JPY") else 1.0
     amount = p.qty * p.price
     amount_krw = amount * fx
     trade_date = p.trade_date or date.today().isoformat()
@@ -90,11 +96,12 @@ def parsed_to_trade(p: ParsedTrade, store: TradeStore) -> Trade:
 
 
 def format_trade_confirm(t: Trade, trade_id: int) -> str:
-    flag = "🇰🇷" if t.market == "KR" else "🇺🇸"
+    flag = {"KR": "🇰🇷", "US": "🇺🇸", "JP": "🇯🇵"}.get(t.market, "🌐")
     side_emoji = "🔵" if t.side == "매수" else "🔴"
+    ticker_str = f" ({t.ticker})" if t.ticker else ""
     return (
         f"✅ 기록 완료\n"
-        f"{side_emoji} #{trade_id} {t.side} {flag} {t.name}\n"
+        f"{side_emoji} #{trade_id} {t.side} {flag} {t.name}{ticker_str}\n"
         f"{t.qty}주 × {fmt_money(t.price, t.currency)} = {fmt_money(t.amount, t.currency)}"
         + (f"\n💱 원화환산: {fmt_money(t.amount_krw)}" if t.currency != "KRW" else "")
         + (f"\n수수료: {fmt_money(t.commission, t.currency)} / 세금: {fmt_money(t.tax, t.currency)}"
@@ -123,96 +130,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n\n".join(results))
 
 
-async def _handle_seed_photo(
-    msg, image_bytes: bytes, store: TradeStore
-) -> None:
-    """보유종목 화면 파싱 → seed 거래 등록"""
-    try:
-        holdings = parse_portfolio_image_bytes(image_bytes, "image/jpeg")
-    except Exception as e:
-        await msg.edit_text(f"❌ 파싱 실패: {e}")
-        return
-
-    if not holdings:
-        await msg.edit_text("❌ 보유종목을 찾지 못했어요.")
-        return
-
-    results = []
-    today = date.today().isoformat()
-    for h in holdings:
-        name, ticker, market = store.resolve_name(h.name)
-        if h.ticker:
-            ticker = h.ticker
-        if h.market:
-            market = h.market
-        currency = h.currency
-        fx = get_fx_rate("USD") if currency == "USD" else 1.0
-        amount = h.qty * h.avg_price
-        trade = Trade(
-            id=None, date=today, time="00:00",
-            market=market, ticker=ticker, name=name,
-            side="매수", qty=h.qty, price=h.avg_price,
-            amount=amount, currency=currency,
-            fx_rate=fx, amount_krw=amount * fx,
-            memo="seed",
-        )
-        trade_id = store.add_trade(trade)
-        flag = "🇰🇷" if market == "KR" else "🇺🇸"
-        results.append(f"#{trade_id} {flag} {name} {h.qty}주 @ {fmt_money(h.avg_price, currency)}")
-
-    await msg.edit_text(
-        f"✅ 보유종목 {len(holdings)}개 시딩 완료\n\n" + "\n".join(results)
-        + "\n\n이제 /portfolio 로 미실현손익 확인 가능해요!"
-    )
-
-
-async def _handle_trade_photo(
-    msg, image_bytes: bytes, store: TradeStore
-) -> None:
-    """체결 화면 파싱 → 거래 등록"""
-    try:
-        parsed_list = parse_image_bytes(image_bytes, "image/jpeg")
-    except Exception as e:
-        await msg.edit_text(f"❌ 파싱 실패: {e}\n\n수동 입력: `매수 종목명 수량 단가`")
-        return
-
-    if not parsed_list:
-        await msg.edit_text(
-            "❓ 체결 화면인가요, 보유종목 화면인가요?\n"
-            "• 체결 화면: 그냥 전송\n"
-            "• 보유종목 화면: 캡션에 '보유' 써서 전송"
-        )
-        return
-
-    results = []
-    for p in parsed_list:
-        trade = parsed_to_trade(p, store)
-        trade_id = store.add_trade(trade)
-        results.append(format_trade_confirm(trade, trade_id))
-
-    await msg.edit_text(
-        f"총 {len(parsed_list)}건 파싱 완료\n\n" + "\n\n".join(results)
-    )
-
-
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """스크린샷 → Claude Vision 파싱 (체결 or 보유종목 자동 판단)"""
     if not is_allowed(update):
         return
-
-    caption = (update.message.caption or "").strip().lower()
-    is_seed = any(kw in caption for kw in ["보유", "잔고", "seed", "시딩", "포트폴리오"])
-
-    msg = await update.message.reply_text("📸 스크린샷 분석 중...")
-    photo = update.message.photo[-1]
-    file = await ctx.bot.get_file(photo.file_id)
-    image_bytes = bytes(await file.download_as_bytearray())
-    store = get_store()
-
-    if is_seed:
-        await _handle_seed_photo(msg, image_bytes, store)
-    else:
-        await _handle_trade_photo(msg, image_bytes, store)
+    await update.message.reply_text("📝 알림톡 텍스트를 복붙해서 보내주세요.")
 
 
 # ─── 명령어 ───────────────────────────────────────────────────
@@ -224,8 +145,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 📊 *매매기록 봇*
 
 *거래 입력:*
-텍스트: `매수 삼전 10 58000`
-이미지: 스크린샷 바로 전송
+`매수 삼전 10 58000`
+알림톡 텍스트 복붙 (종목명(코드) 자동 파싱)
 
 *조회 명령:*
 /today — 오늘 거래
@@ -235,6 +156,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 /pnl — 이번달 손익
 /pnl 2026-01-01 2026-03-31 — 기간 지정
 /report — 주간 마크다운 보고서
+/trailing — 추적손절매 현황
+/trailing TICKER — 특정 종목 현황
+/ta — 기술적 분석 (MA, RSI, 거래량, 캔들)
 
 *자본금:*
 /capital — 자본금 현황
@@ -272,6 +196,19 @@ async def cmd_portfolio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     store = get_store()
     msg = await update.message.reply_text("📡 현재가 조회 중...")
     text = format_portfolio(store)
+    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_ta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /ta — 보유 종목 기술적 분석 스냅샷
+    MA20/60, RSI(14), 거래량, 캔들 패턴 (일봉 기준)
+    """
+    if not is_allowed(update):
+        return
+    store = get_store()
+    msg = await update.message.reply_text("📡 TA 데이터 조회 중...")
+    text = format_ta_report(store)
     await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
@@ -422,8 +359,6 @@ async def cmd_seed(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     기존 보유종목 단건 등록:
       /seed 삼성전자 10 58000
       /seed NVDA 5 135.50 US
-    보유종목 화면 스크린샷 일괄 등록:
-      이미지 캡션에 '보유' 입력 후 전송
     """
     if not is_allowed(update):
         return
@@ -434,8 +369,7 @@ async def cmd_seed(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "`/seed 종목명 수량 평균단가 [KR|US]`\n\n"
             "예시:\n"
             "`/seed 삼성전자 10 58000`\n"
-            "`/seed NVDA 5 135.50 US`\n\n"
-            "여러 종목 한번에: 보유종목 화면 스크린샷을 캡션 '보유'로 전송"
+            "`/seed NVDA 5 135.50 US`"
         )
         return
 
@@ -559,6 +493,154 @@ async def callback_overview(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_trailing(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /trailing          → 전체 보유 종목 trailing stop 현황
+    /trailing TICKER   → 특정 종목 현황
+    """
+    if not is_allowed(update):
+        return
+
+    args = ctx.args or []
+    store = get_store()
+    init_trailing_db(DB_PATH)
+
+    today = date.today().isoformat()
+    STOP_PCT = 10.0
+
+    # 특정 종목 조회
+    if args:
+        raw = args[0]
+        name, ticker, market = store.resolve_name(raw)
+        ticker = ticker or raw.upper()
+
+        # DB에 기록이 있으면 조회
+        stop = get_stop(DB_PATH, ticker, market)
+        if not stop:
+            # 실시간으로 계산
+            portfolio = store.get_portfolio()
+            summary = portfolio.get(name) or next(
+                (v for v in portfolio.values() if v.ticker.upper() == ticker.upper()), None
+            )
+            if not summary:
+                await update.message.reply_text(f"❌ '{raw}' — 보유 포지션 없음")
+                return
+
+            msg = await update.message.reply_text("📡 현재가 조회 중...")
+            current_price = get_current_price(summary.ticker, summary.market)
+            if not current_price:
+                await msg.edit_text(f"❌ 현재가 조회 실패: {summary.ticker}")
+                return
+
+            buy_price = summary.avg_buy_price
+            if summary.market == "US":
+                fx = get_fx_rate("USD")
+                buy_price = buy_price / fx if fx > 0 else buy_price
+
+            result = upsert_stop(DB_PATH, summary.ticker, summary.market,
+                                 current_price, buy_price, STOP_PCT)
+            stop_name = summary.name
+        else:
+            msg = await update.message.reply_text("📡 현재가 조회 중...")
+            current_price = get_current_price(ticker, market)
+            if not current_price:
+                await msg.edit_text(f"❌ 현재가 조회 실패: {ticker}")
+                return
+            portfolio = store.get_portfolio()
+            summary = next(
+                (v for v in portfolio.values() if v.ticker.upper() == ticker.upper()), None
+            )
+            buy_price = summary.avg_buy_price if summary else stop["buy_price"]
+            if market == "US":
+                fx = get_fx_rate("USD")
+                buy_price = buy_price / fx if fx > 0 else buy_price
+
+            result = upsert_stop(DB_PATH, ticker, market, current_price, buy_price, STOP_PCT)
+            stop_name = summary.name if summary else name
+
+        flag = "🇰🇷" if market == "KR" else "🇺🇸"
+        gap = result["gap_pct"]
+        gap_str = f"+{gap:.1f}%" if gap > 0 else f"{gap:.1f}%"
+        emoji = "🚨" if result["triggered"] else ("⚠️" if result["warning"] else "✅")
+
+        def fp(p):
+            return f"${p:,.2f}" if market == "US" else f"{p:,.0f}"
+
+        text = (
+            f"📊 추적손절매 현황 ({today})\n\n"
+            f"{flag} {stop_name} ({ticker})\n"
+            f"현재가: {fp(result['current_price'])}\n"
+            f"고점: {fp(result['high_since_buy'])}\n"
+            f"고점기반 손절선: {fp(result['stop_price'])} "
+            f"(여유 {'+' if result['gap_from_high']>0 else ''}{result['gap_from_high']:.1f}%)\n"
+            f"매수가기반 손절선: {fp(result['buy_stop'])} "
+            f"(여유 {'+' if result['gap_from_buy']>0 else ''}{result['gap_from_buy']:.1f}%)\n"
+            f"상태: {emoji} {gap_str}"
+        )
+        await msg.edit_text(text)
+        return
+
+    # 전체 현황
+    msg = await update.message.reply_text("📡 현재가 조회 중...")
+    portfolio = store.get_portfolio()
+
+    if not portfolio:
+        await msg.edit_text("보유 포지션이 없습니다.")
+        return
+
+    kr_lines: list[str] = []
+    us_lines: list[str] = []
+    errors: list[str] = []
+
+    for name, summary in portfolio.items():
+        if not summary.ticker:
+            errors.append(f"{name} (티커 없음)")
+            continue
+
+        current_price = get_current_price(summary.ticker, summary.market)
+        if not current_price:
+            errors.append(f"{name} (조회 실패)")
+            continue
+
+        buy_price = summary.avg_buy_price
+        if summary.market == "US":
+            fx = get_fx_rate("USD")
+            buy_price = buy_price / fx if fx > 0 else buy_price
+
+        result = upsert_stop(DB_PATH, summary.ticker, summary.market,
+                             current_price, buy_price, STOP_PCT)
+
+        def fp(p, mkt=summary.market):
+            return f"${p:,.2f}" if mkt == "US" else f"{p:,.0f}"
+
+        gh = result.get("gap_from_high", result["gap_pct"])
+        gb = result.get("gap_from_buy",  result["gap_pct"])
+        emoji = "🚨" if result["triggered"] else ("⚠️" if result["warning"] else "✅")
+        def _gap(g): return f"+{g:.1f}%" if g > 0 else f"{g:.1f}%"
+        line = (
+            f"{name} {emoji}\n"
+            f"  현재 {fp(current_price)}\n"
+            f"  고점손절  고점 {fp(result['high_since_buy'])} → 손절선 {fp(result['stop_price'])} | 여유 {_gap(gh)}\n"
+            f"  매수손절  손절선 {fp(result['buy_stop'])} | 여유 {_gap(gb)}"
+        )
+        if summary.market == "KR":
+            kr_lines.append(line)
+        else:
+            us_lines.append(line)
+
+    lines = [f"📊 추적손절매 현황 ({today})"]
+    if kr_lines:
+        lines.append("\n🇰🇷 국내")
+        lines.extend(kr_lines)
+    if us_lines:
+        lines.append("\n🇺🇸 미국")
+        lines.extend(us_lines)
+    if errors:
+        lines.append(f"\n⚠️ 조회 실패: {', '.join(errors)}")
+
+    await msg.edit_text("\n".join(lines))
+
+
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -606,6 +688,8 @@ def main():
     app.add_handler(CommandHandler("alias", cmd_alias))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("overview", cmd_overview))
+    app.add_handler(CommandHandler("trailing", cmd_trailing))
+    app.add_handler(CommandHandler("ta", cmd_ta))
     app.add_handler(CallbackQueryHandler(callback_overview, pattern="^overview:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

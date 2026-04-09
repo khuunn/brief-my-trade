@@ -155,3 +155,87 @@ def test_kakao_missing_fields_returns_empty():
     result = _parse_kakao_alert("종목명 : 삼성전자\n체결단가 : 58000")
     # 매매구분 없음 → 빈 리스트
     assert result == []
+
+
+# ── 이미지 파싱 프롬프트 연도 검증 ───────────────────────────
+
+def test_image_parse_prompt_uses_current_year():
+    """프롬프트에 하드코딩 연도 없이 현재 연도가 동적으로 주입되는지 확인"""
+    from datetime import date
+    from brief_my_trade.parser import _build_image_parse_prompt
+
+    year = date.today().year
+    prompt = _build_image_parse_prompt()
+
+    assert str(year) in prompt, f"현재 연도 {year}이 프롬프트에 없음"
+    assert "2025" not in prompt or year == 2025, "2025가 하드코딩돼 있음"
+    assert "2026" not in prompt or year == 2026, "2026이 하드코딩돼 있음"
+
+
+# ── JP 종목 파싱 ──────────────────────────────────────────────
+
+def test_kakao_jp_buy():
+    """카카오 알림톡 일본 주식 매수 파싱"""
+    alert = """[메리츠증권] 해외주식 주문체결 안내
+
+계좌명 : 송*훈
+계좌번호 : 3023**04-01
+종목명 : QD레이저(6613)
+매매구분 : 매수
+체결단가 : JPY 1,515.0000
+주문수량 : 100주
+체결수량 : 100주
+체결금액 : JPY 151,500.00
+체결일자 : 03/18"""
+    result = parse_text(alert)
+    assert len(result) == 1
+    t = result[0]
+    assert t.currency == "JPY"
+    assert t.ticker == "6613"
+    assert t.name == "QD레이저"
+    assert t.qty == 100
+    assert t.price == 1515.0
+
+
+def test_kakao_jp_sell():
+    """카카오 알림톡 일본 주식 매도 파싱"""
+    alert = """[메리츠증권] 해외주식 주문체결 안내
+종목명 : QD레이저(6613)
+매매구분 : 매도
+체결단가 : JPY 1,600.0000
+체결수량 : 50주
+체결일자 : 03/20"""
+    result = parse_text(alert)
+    assert len(result) == 1
+    assert result[0].side == "매도"
+    assert result[0].currency == "JPY"
+    assert result[0].qty == 50
+    assert result[0].price == 1600.0
+
+
+def test_manual_jp_dot_t():
+    """수동 입력 — .T suffix JP 자동 감지"""
+    result = parse_text("매수 7203.T 10 3200")
+    assert len(result) == 1
+    assert result[0].currency == "JPY"
+    assert result[0].name == "7203.T"
+    assert result[0].qty == 10
+    assert result[0].price == 3200.0
+
+
+def test_kakao_date_always_current_year():
+    """카카오 알림 MM/DD 파싱 시 항상 올해 연도 사용"""
+    from datetime import date
+    year = date.today().year
+
+    alert = f"""[메리츠증권] 해외주식 주문체결 안내
+종목명 : 테슬라(TSLA)
+매매구분 : 매수
+체결단가 : USD 250.00
+체결수량 : 1주
+체결일자 : 06/15"""
+
+    result = _parse_kakao_alert(alert)
+    assert len(result) == 1
+    assert result[0].trade_date == f"{year}-06-15", \
+        f"연도 오류: {result[0].trade_date} (기대: {year}-06-15)"

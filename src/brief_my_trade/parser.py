@@ -6,8 +6,6 @@ parser.py — 매매기록 파싱
 
 from __future__ import annotations
 
-import base64
-import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -27,6 +25,7 @@ class ParsedTrade:
     trade_date: str = ""  # YYYY-MM-DD (없으면 오늘)
     trade_time: str = ""  # HH:MM
     currency: str = "KRW"
+    ticker: str = ""      # 종목코드 (카카오 알림톡에서 추출된 경우)
     raw_text: str = ""    # 원본 텍스트 (디버그용)
 
 
@@ -116,6 +115,7 @@ def _parse_kakao_alert(text: str) -> list[ParsedTrade]:
     return [ParsedTrade(
         side=side, name=name, qty=qty, price=price,
         currency=currency, trade_date=trade_date,
+        ticker=ticker,
         raw_text=text,
     )]
 
@@ -149,9 +149,14 @@ def parse_text(text: str) -> list[ParsedTrade]:
         side = SIDE_MAP.get(side_raw.lower(), side_raw)
         price_clean = float(price_str.replace(",", ""))
 
-        # 해외 종목 자동 감지: 영문 대문자 or 소수점 포함
+        # 해외 종목 자동 감지
         currency = "KRW"
-        if name.isupper() and name.isalpha() and len(name) <= 5:
+        if name.upper().endswith(".T") or (name.isdigit() and len(name) == 4):
+            # 일본 종목: 7203.T 또는 숫자 4자리 (6613 등)
+            # 단, 숫자 4자리는 JPY 명시 없으면 KRW 오판 가능 → .T suffix 있을 때만 JP 자동 감지
+            if name.upper().endswith(".T"):
+                currency = "JPY"
+        elif name.isupper() and name.isalpha() and len(name) <= 5:
             currency = "USD"
         elif "." in price_str:
             currency = "USD"
@@ -169,196 +174,5 @@ def parse_text(text: str) -> list[ParsedTrade]:
     return results
 
 
-# ─── 이미지 파싱 (Claude Vision) ──────────────────────────────
-
-PORTFOLIO_PARSE_PROMPT = """
-메리츠증권 mPOP 앱의 보유종목/잔고 화면 스크린샷에서 현재 보유 종목 목록을 추출해줘.
-
-아래 JSON 배열 형식으로만 응답해:
-[
-  {
-    "name": "종목명",
-    "ticker": "종목코드 (있으면, 없으면 빈 문자열)",
-    "qty": 보유수량(정수),
-    "avg_price": 평균매입단가(숫자),
-    "currency": "KRW 또는 USD",
-    "market": "KR 또는 US"
-  }
-]
-
-규칙:
-- 예수금/현금은 제외, 종목만 추출
-- 해외주식이면 currency=USD, market=US
-- JSON 외 다른 텍스트 절대 출력 금지
-"""
 
 
-IMAGE_PARSE_PROMPT = """
-메리츠증권 카카오 알림톡 또는 mPOP 체결 화면 스크린샷에서 매매 내역을 추출해줘.
-
-카카오 알림톡 형식 예시:
-  종목명 : 퀵로직(QUIK)
-  매매구분 : 매수
-  체결단가 : USD 8.8500
-  체결수량 : 2주
-  체결금액 : USD 17.70
-  체결일자 : 03/05
-
-아래 JSON 배열 형식으로만 응답해:
-[
-  {
-    "side": "매수 또는 매도",
-    "name": "종목명 (한글명, 예: 퀵로직)",
-    "ticker": "티커 (괄호 안 영문, 예: QUIK. 없으면 빈 문자열)",
-    "qty": 체결수량(정수),
-    "price": 체결단가(숫자만, 통화기호 제외),
-    "commission": 수수료(숫자, 없으면 0),
-    "tax": 세금(숫자, 없으면 0),
-    "date": "YYYY-MM-DD (MM/DD면 올해 연도 붙이기, 예: 03/05 → 2026-03-05)",
-    "time": "HH:MM (있으면, 없으면 빈 문자열)",
-    "currency": "KRW 또는 USD (체결단가에 USD 있으면 USD, 없으면 KRW)",
-    "market": "KR 또는 US (USD면 US, KRW면 KR)"
-  }
-]
-
-규칙:
-- 화면에 여러 건이면 모두 추출
-- 종목명(QUIK) 처럼 괄호 안 영문은 ticker로 추출
-- 날짜가 MM/DD면 현재 연도(2026) 붙여서 YYYY-MM-DD로
-- JSON 외 다른 텍스트 절대 출력 금지
-"""
-
-
-def _call_vision(image_b64: str, mime_type: str) -> list[dict]:
-    """
-    OpenRouter를 통해 Claude Vision 호출.
-    OPENROUTER_API_KEY 환경변수 사용.
-    """
-    import json as _json
-    from openai import OpenAI
-
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY 환경변수 없음")
-
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
-    )
-
-    response = client.chat.completions.create(
-        model="anthropic/claude-opus-4-5",
-        max_tokens=1024,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
-                },
-                {"type": "text", "text": IMAGE_PARSE_PROMPT},
-            ],
-        }],
-    )
-
-    if not response.choices:
-        raise RuntimeError("Vision API 응답 없음 (choices 비어있음)")
-
-    raw = response.choices[0].message.content.strip()
-    try:
-        return _json.loads(raw)
-    except _json.JSONDecodeError:
-        m = re.search(r"\[.*\]", raw, re.DOTALL)
-        if m:
-            return _json.loads(m.group())
-        raise RuntimeError(f"이미지 파싱 실패: {raw[:200]}")
-
-
-def parse_image(image_path: str | Path) -> list[ParsedTrade]:
-    """이미지 파일 경로로 파싱"""
-    image_data = Path(image_path).read_bytes()
-    ext = Path(image_path).suffix.lower()
-    mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
-    return parse_image_bytes(image_data, mime)
-
-
-@dataclass
-class ParsedHolding:
-    name: str
-    ticker: str
-    qty: int
-    avg_price: float
-    currency: str = "KRW"
-    market: str = "KR"
-
-
-def parse_portfolio_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> list[ParsedHolding]:
-    """보유종목 화면 스크린샷 → ParsedHolding 목록"""
-    import json as _json
-    from openai import OpenAI
-
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY 환경변수 없음")
-
-    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-    client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-    response = client.chat.completions.create(
-        model="anthropic/claude-opus-4-5",
-        max_tokens=1024,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
-                {"type": "text", "text": PORTFOLIO_PARSE_PROMPT},
-            ],
-        }],
-    )
-
-    if not response.choices:
-        raise RuntimeError("Vision API 응답 없음 (choices 비어있음)")
-
-    raw = response.choices[0].message.content.strip()
-    try:
-        items = _json.loads(raw)
-    except _json.JSONDecodeError:
-        m = re.search(r"\[.*\]", raw, re.DOTALL)
-        items = _json.loads(m.group()) if m else []
-
-    return [
-        ParsedHolding(
-            name=i.get("name", ""),
-            ticker=i.get("ticker", ""),
-            qty=int(i.get("qty", 0)),
-            avg_price=float(i.get("avg_price", 0)),
-            currency=i.get("currency", "KRW"),
-            market=i.get("market", "KR"),
-        )
-        for i in items if i.get("qty", 0) > 0
-    ]
-
-
-def parse_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> list[ParsedTrade]:
-    """
-    바이트 데이터로 직접 파싱 (텔레그램 파일 다운로드 후 사용)
-    OpenRouter를 통해 Claude Vision 호출.
-    """
-    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-    items = _call_vision(b64, mime_type)
-
-    return [
-        ParsedTrade(
-            side=i.get("side", "매수"),
-            name=i.get("name", ""),
-            qty=int(i.get("qty", 0)),
-            price=float(i.get("price", 0)),
-            commission=float(i.get("commission", 0)),
-            tax=float(i.get("tax", 0)),
-            trade_date=i.get("date", ""),
-            trade_time=i.get("time", ""),
-            currency=i.get("currency", "KRW"),
-            raw_text=str(i),
-        )
-        for i in items
-    ]

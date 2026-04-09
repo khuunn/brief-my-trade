@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # 국내 종목 티커 suffix
 KR_SUFFIX = ".KS"   # KRX (KOSPI/KOSDAQ)
 KQ_SUFFIX = ".KQ"   # KOSDAQ fallback
+JP_SUFFIX = ".T"    # 도쿄증권거래소
 
 _price_cache: dict[str, tuple[float, float]] = {}  # ticker → (price, timestamp)
 _CACHE_TTL = 300  # 5분 캐시
@@ -26,6 +27,7 @@ def get_current_price(ticker: str, market: str) -> Optional[float]:
     현재가 조회.
     - KR: ticker 숫자 6자리 → '{ticker}.KS' 시도, 실패 시 '.KQ'
     - US: ticker 그대로 (AAPL, NVDA 등)
+    - JP: ticker 숫자 4자리 → '{ticker}.T'
     """
     cache_key = f"{market}:{ticker}"
     if cache_key in _price_cache:
@@ -36,6 +38,8 @@ def get_current_price(ticker: str, market: str) -> Optional[float]:
     try:
         if market == "KR":
             price = _fetch_kr_price(ticker)
+        elif market == "JP":
+            price = _fetch_jp_price(ticker)
         else:
             price = _fetch_us_price(ticker)
 
@@ -86,6 +90,21 @@ def _fetch_kr_price(ticker: str) -> Optional[float]:
         price2 = getattr(info2, "last_price", None)
         if price2 and price2 > 0:
             return price2
+    return None
+
+
+def _fetch_jp_price(ticker: str) -> Optional[float]:
+    """도쿄증권거래소 종목 현재가 (JPY). 숫자 코드에 .T suffix 붙임."""
+    code = ticker.replace(JP_SUFFIX, "")
+    symbol = f"{code}{JP_SUFFIX}"
+    try:
+        t = yf.Ticker(symbol)
+        info = t.fast_info
+        price = getattr(info, "last_price", None)
+        if price and price > 0:
+            return price
+    except Exception as exc:
+        logger.warning("JP 현재가 조회 실패 [%s]: %s", symbol, exc)
     return None
 
 
@@ -146,8 +165,9 @@ def get_unrealized_pnl(
     미실현손익 계산.
     - KR 종목: yfinance KRW 가격 → KRW 비교
     - US 종목 (currency=KRW): yfinance USD 가격 → KRW 환산 후 비교
-    - US 종목 (currency=USD): yfinance USD 가격 → USD 비교
-    Returns: {current_price_krw, unrealized_pnl_krw, fx_rate, return_pct}
+    - US 종목 (currency=USD): yfinance USD 가격 → KRW 환산
+    - JP 종목 (currency=JPY or KRW): yfinance JPY 가격 → KRW 환산
+    Returns: {current_price, current_price_krw, unrealized_pnl_krw, fx_rate, return_pct}
     """
     if net_qty <= 0 or not ticker:
         return None
@@ -156,22 +176,31 @@ def get_unrealized_pnl(
     if current_price is None:
         return None
 
-    fx_usd = get_fx_rate("USD")  # 1 USD = ? KRW
-
     if market == "US":
-        # current_price는 USD
-        current_price_krw = current_price * fx_usd
+        fx = get_fx_rate("USD")
+        current_price_krw = current_price * fx
         if currency == "KRW":
-            # avg_buy_price도 KRW → 직접 비교
             unrealized_krw = (current_price_krw - avg_buy_price) * net_qty
             cost_krw = avg_buy_price * net_qty
         else:
-            # avg_buy_price가 USD
-            avg_buy_price_krw = avg_buy_price * fx_usd
+            avg_buy_price_krw = avg_buy_price * fx
+            unrealized_krw = (current_price_krw - avg_buy_price_krw) * net_qty
+            cost_krw = avg_buy_price_krw * net_qty
+    elif market == "JP":
+        fx = get_fx_rate("JPY")
+        current_price_krw = current_price * fx
+        if currency == "KRW":
+            # avg_buy_price가 KRW로 저장된 경우 (seed 입력 등)
+            unrealized_krw = (current_price_krw - avg_buy_price) * net_qty
+            cost_krw = avg_buy_price * net_qty
+        else:
+            # avg_buy_price가 JPY로 저장된 경우 (알림톡 정상 입력)
+            avg_buy_price_krw = avg_buy_price * fx
             unrealized_krw = (current_price_krw - avg_buy_price_krw) * net_qty
             cost_krw = avg_buy_price_krw * net_qty
     else:
-        # KR 종목: 모두 KRW
+        # KR: 모두 KRW
+        fx = 1.0
         current_price_krw = current_price
         unrealized_krw = (current_price_krw - avg_buy_price) * net_qty
         cost_krw = avg_buy_price * net_qty
@@ -182,6 +211,6 @@ def get_unrealized_pnl(
         "current_price": current_price,
         "current_price_krw": current_price_krw,
         "unrealized_pnl_krw": unrealized_krw,
-        "fx_rate": fx_usd,
+        "fx_rate": fx,
         "return_pct": return_pct,
     }

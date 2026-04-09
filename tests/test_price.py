@@ -12,9 +12,10 @@ def _mock_pnl(ticker, market, currency, net_qty, avg_buy_price,
     """
     get_unrealized_pnl을 mock price/fx로 호출하는 헬퍼.
     - KR 종목: current_price_krw 지정
-    - US 종목: current_price_usd 지정
+    - US 종목: current_price_usd 지정 (USD 단가)
+    - JP 종목: current_price_usd 지정 (JPY 단가 — 파라미터명 재사용)
     """
-    price = current_price_usd if market == "US" else current_price_krw
+    price = current_price_usd if market in ("US", "JP") else current_price_krw
     with patch("brief_my_trade.price.get_current_price", return_value=price), \
          patch("brief_my_trade.price.get_fx_rate", return_value=fx):
         return get_unrealized_pnl("테스트", ticker, market, currency, net_qty, avg_buy_price)
@@ -75,6 +76,39 @@ def test_us_usd_stored_profit():
 
 
 # ── 예외 케이스 ───────────────────────────────────────────────
+
+# ── JP 종목 ───────────────────────────────────────────────────
+
+def test_jp_jpy_stored_profit():
+    """JP 종목, 평균단가 JPY로 저장. 현재가 JPY → KRW 환산."""
+    # avg=1500 JPY, 현재=1600 JPY, fx=9.2
+    result = _mock_pnl("6613", "JP", "JPY", 100, 1500.0,
+                       current_price_usd=1600.0, fx=9.2)
+    assert result is not None
+    expected_pnl_krw = (1600.0 - 1500.0) * 100 * 9.2  # = 92000
+    assert result["unrealized_pnl_krw"] == pytest.approx(expected_pnl_krw)
+    assert result["current_price_krw"] == pytest.approx(1600.0 * 9.2)
+
+
+def test_jp_krw_stored():
+    """JP 종목, 평균단가 KRW로 저장 (seed 입력 등). KRW 직접 비교."""
+    # avg=13800원, 현재=1600JPY=14720원, fx=9.2
+    result = _mock_pnl("6613", "JP", "KRW", 100, 13800.0,
+                       current_price_usd=1600.0, fx=9.2)
+    assert result is not None
+    current_krw = 1600.0 * 9.2  # 14720
+    expected_pnl = (current_krw - 13800.0) * 100
+    assert result["unrealized_pnl_krw"] == pytest.approx(expected_pnl)
+
+
+def test_jp_loss():
+    """JP 종목 손실 케이스"""
+    result = _mock_pnl("7203", "JP", "JPY", 50, 3000.0,
+                       current_price_usd=2800.0, fx=9.2)
+    assert result is not None
+    assert result["unrealized_pnl_krw"] < 0
+    assert result["return_pct"] < 0
+
 
 def test_zero_qty_returns_none():
     """보유 수량 0이면 None 반환"""

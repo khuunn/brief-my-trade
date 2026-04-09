@@ -4,10 +4,13 @@ report.py — 요약 텍스트 + 마크다운 보고서 생성
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from .store import StockSummary, TradeStore
 from .price import get_fx_rate, get_unrealized_pnl
+from .ta import build_ta_snapshot
+
+_KST = timezone(timedelta(hours=9))
 
 
 # ─── 포맷 유틸 ────────────────────────────────────────────────
@@ -15,6 +18,8 @@ from .price import get_fx_rate, get_unrealized_pnl
 def fmt_money(val: float, currency: str = "KRW") -> str:
     if currency == "KRW":
         return f"{val:,.0f}원"
+    if currency == "JPY":
+        return f"¥{val:,.0f}"
     return f"{val:,.2f} {currency}"
 
 
@@ -36,13 +41,21 @@ def fmt_pct(val: float) -> str:
 # ─── 텔레그램 짧은 요약 ───────────────────────────────────────
 
 def format_today_summary(store: TradeStore) -> str:
+    today = date.today().isoformat()
     trades = store.get_today_trades()
     if not trades:
         return "오늘 거래 없음"
 
-    summaries = store.summarize_trades(trades)
-    lines = [f"📅 *오늘 거래 — {date.today().isoformat()}*\n"]
+    # 전체 이력으로 이동평균단가 추적 후 오늘 매도분만 realized_pnl 반영
+    all_trades = store.get_trades_by_date_range("2000-01-01", today)
+    summaries = store.summarize_trades(all_trades, pnl_after=today)
+
+    # 오늘 거래가 있는 종목만 표시
+    today_names = {t.name for t in trades}
+    lines = [f"📅 *오늘 거래 — {today}*\n"]
     for s in summaries.values():
+        if s.name not in today_names:
+            continue
         lines.append(f"• {s.name} ({s.market})")
         if s.buy_qty:
             lines.append(f"  매수 {s.buy_qty}주 × {fmt_money(s.avg_buy_price, s.currency)}")
@@ -57,7 +70,7 @@ def format_portfolio(store: TradeStore) -> str:
     lines = ["📊 *보유 포지션*\n"]
     has_any = False
 
-    for market_label, market_code in [("🇰🇷 국내", "KR"), ("🇺🇸 해외", "US")]:
+    for market_label, market_code in [("🇰🇷 국내", "KR"), ("🇺🇸 해외", "US"), ("🇯🇵 일본", "JP")]:
         portfolio = store.get_portfolio(market_code)
         if not portfolio:
             continue
@@ -97,7 +110,7 @@ def format_period_summary(store: TradeStore, start: str, end: str) -> str:
     total_realized_krw = 0.0
     total_trade_count = 0
 
-    for market_label, market_code in [("🇰🇷 국내", "KR"), ("🇺🇸 해외", "US")]:
+    for market_label, market_code in [("🇰🇷 국내", "KR"), ("🇺🇸 해외", "US"), ("🇯🇵 일본", "JP")]:
         stats = store.get_period_stats(start, end, market_code)
         # seed 거래 제외 후 실제 거래 수
         real_count = stats.get("real_trade_count", stats["trade_count"])
@@ -108,16 +121,12 @@ def format_period_summary(store: TradeStore, start: str, end: str) -> str:
             pnl * get_fx_rate(cur)
             for cur, pnl in stats["realized_by_currency"].items()
         )
-        cap = store.get_capital(market_code).get(market_code, 0)
-        ret_pct = (realized_krw / cap * 100) if cap > 0 else 0.0
 
         total_realized_krw += realized_krw
         total_trade_count += real_count
 
         lines.append(f"*{market_label}* ({real_count}건)")
         lines.append(f"  실현손익: {fmt_pnl(realized_krw)}")
-        if cap > 0:
-            lines.append(f"  수익률:   {fmt_pct(ret_pct)}")
         lines.append("")
 
     if total_trade_count == 0:
@@ -182,7 +191,7 @@ def format_overview(store: TradeStore, period_key: str = "all") -> str:
     total_unrealized_krw = 0.0
     total_realized_krw = 0.0
 
-    for market_label, market_code in [("🇰🇷 국내", "KR"), ("🇺🇸 해외", "US")]:
+    for market_label, market_code in [("🇰🇷 국내", "KR"), ("🇺🇸 해외", "US"), ("🇯🇵 일본", "JP")]:
         portfolio = store.get_portfolio(market_code)
 
         # 투자원금 + 현재평가 + 미실현손익
@@ -230,6 +239,8 @@ def format_overview(store: TradeStore, period_key: str = "all") -> str:
         lines.append(f"  기간실현손익 {fmt_pnl(realized_krw)}")
         lines.append(f"  합산손익    {fmt_pnl(total_pnl)} ({fmt_pct(total_pnl_pct)})")
         lines.append("")
+        lines.append("---")
+        lines.append("")
 
         total_cost_krw += cost_krw
         total_eval_krw += eval_krw
@@ -260,6 +271,7 @@ def generate_weekly_report(store: TradeStore, ref_date: str = None) -> str:
     ref = date.fromisoformat(ref_date) if ref_date else date.today()
     monday = ref - timedelta(days=ref.weekday())
     friday = monday + timedelta(days=4)
+    today_str = date.today().isoformat()
     trades = store.get_trades_by_date_range(monday.isoformat(), friday.isoformat())
 
     lines = [
@@ -269,7 +281,50 @@ def generate_weekly_report(store: TradeStore, ref_date: str = None) -> str:
         "",
     ]
 
-    # 시장별 섹션
+    # ── 1) YTD 누적 성과 ─────────────────────────────────────
+    ytd_start = f"{ref.year}-01-01"
+    ytd_realized_krw = 0.0
+    week_realized_krw = 0.0
+
+    for market_code in ["KR", "US"]:
+        ytd_stats = store.get_period_stats(ytd_start, today_str, market_code)
+        week_stats = store.get_period_stats(monday.isoformat(), friday.isoformat(), market_code)
+        fx = get_fx_rate("USD") if market_code == "US" else 1.0
+        ytd_realized_krw += sum(
+            pnl * (get_fx_rate(cur) if cur != "KRW" else 1.0)
+            for cur, pnl in ytd_stats["realized_by_currency"].items()
+        )
+        week_realized_krw += sum(
+            pnl * (get_fx_rate(cur) if cur != "KRW" else 1.0)
+            for cur, pnl in week_stats["realized_by_currency"].items()
+        )
+
+    lines += [
+        "## 📈 누적 성과 (YTD)",
+        "| 항목 | 금액 |",
+        "|---|---|",
+        f"| 이번 주 실현손익 | {fmt_pnl(week_realized_krw)} |",
+        f"| 연초 누적 실현손익 ({ref.year}년) | {fmt_pnl(ytd_realized_krw)} |",
+        "",
+    ]
+
+    # ── 2) 이번 주 Best / Worst 종목 ──────────────────────────
+    all_summaries = store.summarize_trades(trades)
+    traded_summaries = {k: v for k, v in all_summaries.items() if v.realized_pnl != 0}
+
+    if traded_summaries:
+        best = max(traded_summaries.values(), key=lambda s: s.realized_pnl)
+        worst = min(traded_summaries.values(), key=lambda s: s.realized_pnl)
+        lines += [
+            "## 🏆 이번 주 Best / Worst",
+            "| 구분 | 종목 | 실현손익 |",
+            "|---|---|---|",
+            f"| 🥇 Best | {best.name} | {fmt_pnl(best.realized_pnl)} |",
+            f"| 💀 Worst | {worst.name} | {fmt_pnl(worst.realized_pnl)} |",
+            "",
+        ]
+
+    # ── 시장별 섹션 ───────────────────────────────────────────
     for market_label, market_code, currency in [
         ("🇰🇷 국내 (KRW)", "KR", "KRW"),
         ("🇺🇸 해외 (USD)", "US", "USD"),
@@ -319,4 +374,145 @@ def generate_weekly_report(store: TradeStore, ref_date: str = None) -> str:
             )
         lines.append("")
 
+    # ── 3) 다음 주 보유 포지션 ────────────────────────────────
+    lines += ["## 📦 다음 주 보유 포지션", ""]
+    has_position = False
+
+    for market_label, market_code, currency in [
+        ("🇰🇷 국내", "KR", "KRW"),
+        ("🇺🇸 해외", "US", "USD"),
+    ]:
+        portfolio = store.get_portfolio(market_code)
+        if not portfolio:
+            continue
+        has_position = True
+        lines.append(f"### {market_label}")
+        lines += [
+            "| 종목 | 보유수량 | 평균단가 | 현재가 | 미실현손익 | 수익률 |",
+            "|---|---|---|---|---|---|",
+        ]
+        for s in portfolio.values():
+            unr = get_unrealized_pnl(
+                s.name, s.ticker, s.market, s.currency,
+                s.net_qty, s.avg_buy_price,
+            )
+            if unr:
+                cur_price = unr.get("current_price_krw", unr.get("current_price", 0))
+                pnl_str = fmt_pnl(unr["unrealized_pnl_krw"])
+                pct_str = fmt_pct(unr["return_pct"])
+                price_str = fmt_money(cur_price)
+            else:
+                price_str = "—"
+                pnl_str = "—"
+                pct_str = "—"
+            lines.append(
+                f"| {s.name} | {s.net_qty}주 | {fmt_money(s.avg_buy_price, currency)}"
+                f" | {price_str} | {pnl_str} | {pct_str} |"
+            )
+        lines.append("")
+
+    if not has_position:
+        lines.append("_보유 포지션 없음 — 다음 주 현금 100%_")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ─── TA 분석 ─────────────────────────────────────────────────
+
+_PATTERN_LABEL: dict[str, str] = {
+    "bullish_engulfing": "🟢 Bullish Engulfing (상승 장악)",
+    "bearish_engulfing": "🔴 Bearish Engulfing (하락 장악)",
+    "hammer":            "🔨 Hammer (망치 — 반등 신호)",
+    "shooting_star":     "⭐ Shooting Star (유성 — 반락 신호)",
+    "doji":              "➕ Doji (추세 불확실)",
+}
+
+_TREND_LABEL: dict[str, str] = {
+    "bullish": "📈 강세 (MA20 > MA60 위)",
+    "bearish": "📉 약세 (MA20 < MA60 아래)",
+    "neutral": "➡️ 중립",
+}
+
+
+def _fmt_price(val: float, currency: str) -> str:
+    if currency == "USD":
+        return f"${val:,.2f}"
+    return f"{val:,.0f}원"
+
+
+def _fmt_volume(vol: float) -> str:
+    if vol >= 1_000_000:
+        return f"{vol / 1_000_000:.1f}M"
+    if vol >= 1_000:
+        return f"{vol / 1_000:.0f}K"
+    return f"{vol:.0f}"
+
+
+def _rsi_label(rsi: float) -> str:
+    if rsi >= 70:
+        return f"{rsi} ⚠️ 과매수"
+    if rsi <= 30:
+        return f"{rsi} ⚠️ 과매도"
+    return f"{rsi} 중립"
+
+
+def format_ta_report(store: TradeStore) -> str:
+    """
+    보유 종목 전체 기술적 분석 스냅샷.
+    KR → US 순으로 출력. 조회 실패 종목은 스킵 표시.
+    """
+    lines = ["📡 *기술적 분석 스냅샷*\n"]
+    has_any = False
+
+    for market_code, flag in [("KR", "🇰🇷"), ("US", "🇺🇸"), ("JP", "🇯🇵")]:
+        portfolio = store.get_portfolio(market_code)
+        if not portfolio:
+            continue
+
+        for s in portfolio.values():
+            has_any = True
+            currency = "USD" if market_code == "US" else "KRW"
+            ticker_label = f"({s.ticker})" if s.ticker else ""
+
+            snap = build_ta_snapshot(s.ticker, market_code) if s.ticker else None
+
+            if snap is None:
+                lines.append(f"{flag} *{s.name}* {ticker_label} — 데이터 조회 실패\n")
+                continue
+
+            price_str = _fmt_price(snap["price"], currency)
+            ma20_str  = _fmt_price(snap["ma20"],  currency) if snap["ma20"]  else "—"
+            ma60_str  = _fmt_price(snap["ma60"],  currency) if snap["ma60"]  else "—"
+            rsi_str   = _rsi_label(snap["rsi"])              if snap["rsi"]   is not None else "—"
+            trend_str = _TREND_LABEL.get(snap["trend"], "—")
+
+            # 거래량
+            vol_str = _fmt_volume(snap["volume"])
+            if snap["volume_ratio"] is not None:
+                ratio = snap["volume_ratio"]
+                diff_pct = (ratio - 1.0) * 100
+                sign = "+" if diff_pct >= 0 else ""
+                intensity = " 🔥" if ratio >= 1.5 else (" 🔻" if ratio <= 0.5 else "")
+                vol_str += f" (평균 대비 {sign}{diff_pct:.0f}%{intensity})"
+
+            # 캔들 패턴
+            pattern_str = _PATTERN_LABEL.get(snap["candle_pattern"], "") if snap["candle_pattern"] else ""
+
+            block = [f"{flag} *{s.name}* {ticker_label}"]
+            block.append(f"  현재가: {price_str}")
+            block.append(f"  MA20: {ma20_str} | MA60: {ma60_str}")
+            block.append(f"  추세: {trend_str}")
+            block.append(f"  RSI(14): {rsi_str}")
+            block.append(f"  거래량: {vol_str}")
+            if pattern_str:
+                block.append(f"  캔들: {pattern_str}")
+            lines.append("\n".join(block))
+            lines.append("")
+
+    if not has_any:
+        return "보유 포지션 없음"
+
+    now_kst = datetime.now(_KST)
+    lines.append(f"_조회: {now_kst:%Y-%m-%d %H:%M} KST (일봉 기준)_")
     return "\n".join(lines)

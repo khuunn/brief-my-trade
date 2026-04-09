@@ -9,10 +9,10 @@ LOG="$DIR/logs/bot.log"
 PID_FILE="$DIR/logs/bot.pid"
 mkdir -p "$DIR/logs" "$DIR/reports"
 
-# venv 우선순위: 로컬 → roly-suite 공유
-VENV="$DIR/.venv/bin/python"
+# venv 우선순위: roly-suite 공유 → 로컬
+VENV="/home/node/.openclaw/workspace/roly-suite/.venv/bin/python"
 if [ ! -f "$VENV" ]; then
-    VENV="/home/node/.openclaw/workspace/roly-suite/.venv/bin/python"
+    VENV="$DIR/.venv/bin/python"
 fi
 if [ ! -f "$VENV" ]; then
     echo "❌ Python venv 없음"
